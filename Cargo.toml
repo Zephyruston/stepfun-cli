@@ -1,6 +1,6 @@
 [package]
 name = "stepfun-cli"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Monitor StepFun (阶跃星辰) API usage and credits from the terminal"
 license = "MIT"

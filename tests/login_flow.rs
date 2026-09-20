@@ -90,3 +90,90 @@ fn login_failure_reports_server_message() {
 
     server.finish();
 }
+
+// ── RefreshToken ──────────────────────────────────────────────────────────
+
+const ACCOUNT: &str = r#"{"exp":1789914879,"oasis_id":378765055100170240}"#;
+const ANONYMOUS: &str = r#"{"exp":1789914879,"oasis_id":412970297706733568}"#;
+
+/// Renewing a session needs no password: the stored token is exchanged for a
+/// fresh pair of halves and reassembled into the cookie shape.
+#[test]
+fn refresh_token_renews_both_halves_into_the_cookie_shape() {
+    let session = common::jwt(ACCOUNT);
+    let server = MockServer::start(vec![Response::ok(&format!(
+        r#"{{"accessToken":{{"raw":"{session}","duration":1800}},
+             "refreshToken":{{"raw":"fresh.device.jwt"}}}}"#
+    ))]);
+    let auth = AuthManager::with_base_urls(&server.url, &server.url);
+
+    let renewed = auth
+        .refresh_token(&common::oasis_token(ACCOUNT), "device-1")
+        .unwrap();
+
+    assert_eq!(renewed, format!("{session}...fresh.device.jwt"));
+
+    let request = server.next_request();
+    assert!(request.contains("PassportService/RefreshToken"));
+    // The current token travels as the single cookie field, and the device id
+    // the session is bound to rides along as a header.
+    assert!(request.contains("cookie: Oasis-Token="));
+    assert!(request.contains("oasis-webid: device-1"));
+
+    server.finish();
+}
+
+/// A lapsed device half does not come back as an error: the server quietly
+/// issues an anonymous session. Saving that would silently drop the account,
+/// so the refresh is refused instead.
+#[test]
+fn a_refresh_that_comes_back_anonymous_is_refused() {
+    let server = MockServer::start(vec![Response::ok(&format!(
+        r#"{{"accessToken":{{"raw":"{}","duration":1800}},
+             "refreshToken":{{"raw":"anon.device.jwt"}}}}"#,
+        common::jwt(ANONYMOUS)
+    ))]);
+    let auth = AuthManager::with_base_urls(&server.url, &server.url);
+
+    let error = auth
+        .refresh_token(&common::oasis_token(ACCOUNT), "device-1")
+        .unwrap_err();
+    assert!(matches!(error, StepFunError::TokenExpired), "{error}");
+
+    server.finish();
+}
+
+/// Half a token cannot be reassembled into a cookie.
+#[test]
+fn a_refresh_missing_a_half_is_reported() {
+    let server = MockServer::start(vec![Response::ok(
+        r#"{"accessToken":{"raw":"e30.e30.e30","duration":1800}}"#,
+    )]);
+    let auth = AuthManager::with_base_urls(&server.url, &server.url);
+
+    let error = auth
+        .refresh_token(&common::oasis_token(ACCOUNT), "device-1")
+        .unwrap_err();
+    assert!(matches!(error, StepFunError::Parse(_)), "{error}");
+    assert!(error.to_string().contains("device half"));
+
+    server.finish();
+}
+
+#[test]
+fn a_failed_refresh_reports_the_server_message() {
+    let server = MockServer::start(vec![Response {
+        status: 400,
+        headers: vec![("content-type".to_string(), "application/json".to_string())],
+        body: r#"{"code":"invalid_argument","message":"device is gone"}"#.to_string(),
+    }]);
+    let auth = AuthManager::with_base_urls(&server.url, &server.url);
+
+    let error = auth
+        .refresh_token(&common::oasis_token(ACCOUNT), "device-1")
+        .unwrap_err();
+    assert!(matches!(error, StepFunError::LoginFailed(_)), "{error}");
+    assert!(error.to_string().contains("device is gone"));
+
+    server.finish();
+}

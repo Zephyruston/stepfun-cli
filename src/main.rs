@@ -13,7 +13,24 @@ use stepfun_cli::error::StepFunError;
 fn main() {
     let cli = Cli::parse();
 
-    if let Err(e) = run(cli.command) {
+    // The session half of the token expires 30 minutes after it is issued, so
+    // it is renewed up front when it is about to lapse, and again whenever a
+    // call comes back expired — then the command is retried once. Only the
+    // commands that actually query the platform need a session to renew.
+    let result = if matches!(
+        cli.command,
+        Commands::Login { .. } | Commands::Logout | Commands::Completions { .. }
+    ) {
+        run(cli.command)
+    } else {
+        auth::with_auto_refresh(
+            || auth::credentials().map(|c| auth::needs_refresh(&c)),
+            || run(cli.command.clone()),
+            || auth::refresh().map(|_| ()),
+        )
+    };
+
+    if let Err(e) = result {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     }
@@ -123,7 +140,7 @@ fn login(username: Option<String>, password: Option<String>) -> Result<()> {
                     "account and password must not be empty".to_string(),
                 ));
             }
-            auth.login(&username, &password)?
+            stepfun_cli::auth::login(&username, &password)?
         }
         (None, None) => auth.login_interactive()?,
         _ => {

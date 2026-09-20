@@ -242,6 +242,94 @@ pub struct SignInRequest {
     pub password: String,
 }
 
+// ── RefreshToken ──────────────────────────────────────────────────────────
+
+/// Response of `RefreshToken`: both halves of the renewed token.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RefreshTokenResponse {
+    /// The 30-minute session half.
+    #[serde(rename = "accessToken", alias = "access_token")]
+    pub access_token: Option<Token>,
+    /// The 30-day device half, which is what makes the refresh possible.
+    #[serde(rename = "refreshToken", alias = "refresh_token")]
+    pub refresh_token: Option<Token>,
+}
+
+/// One half of the Oasis token, as the platform reports it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Token {
+    pub raw: String,
+    /// Lifetime of the session half in seconds (`1800`).
+    pub duration: Option<i64>,
+}
+
+// ── Claims read out of a token ────────────────────────────────────────────
+
+/// The two claims the CLI needs from a token's session half.
+///
+/// The signature is never verified — only the server can do that — so these
+/// serve local decisions only: whether the session is about to lapse, and
+/// whether a refresh still belongs to the same account.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SessionClaims {
+    /// Unix seconds at which the session half stops being accepted.
+    pub exp: Option<i64>,
+    /// Account the session belongs to.
+    #[serde(rename = "oasis_id")]
+    pub oasis_id: Option<i64>,
+}
+
+/// Read the claims of the session (first) half of an Oasis token.
+///
+/// Returns `None` when the value is not the two-JWT shape the platform issues,
+/// which leaves every caller on its safest path.
+pub fn session_claims(token: &str) -> Option<SessionClaims> {
+    let payload = token.split('.').nth(1)?;
+    serde_json::from_slice(&base64url_decode(payload)?).ok()
+}
+
+/// Decode one unpadded base64url segment, as JWTs use.
+fn base64url_decode(segment: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(segment.len() * 3 / 4);
+    let mut buffer = 0u32;
+    let mut bits = 0u32;
+    for byte in segment.bytes() {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'-' => 62,
+            b'_' => 63,
+            _ => return None,
+        };
+        buffer = (buffer << 6) | u32::from(value);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buffer >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// Encode to unpadded base64url — the inverse of [`base64url_decode`], so
+/// tests can build token-shaped fixtures without shipping an encoder.
+#[cfg(test)]
+pub(crate) fn base64url_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let mut buffer = 0u32;
+        for (i, byte) in chunk.iter().enumerate() {
+            buffer |= u32::from(*byte) << (16 - 8 * i);
+        }
+        for i in 0..chunk.len() + 1 {
+            out.push(ALPHABET[(buffer >> (18 - 6 * i)) as usize & 63] as char);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,5 +481,66 @@ mod tests {
         assert_eq!(value["toTime"], "2");
         assert_eq!(value["pageSize"], 50);
         assert_eq!(value["granularHour"], 1);
+    }
+
+    #[test]
+    fn refresh_token_response_reads_both_halves() {
+        let parsed: RefreshTokenResponse = serde_json::from_value(json(
+            r#"{"accessToken":{"raw":"session.jwt","duration":1800,"mode":2},
+                "refreshToken":{"raw":"device.jwt"}}"#,
+        ))
+        .unwrap();
+        let access = parsed.access_token.unwrap();
+        assert_eq!(access.raw, "session.jwt");
+        assert_eq!(access.duration, Some(1800));
+        assert_eq!(parsed.refresh_token.unwrap().raw, "device.jwt");
+    }
+
+    /// A cookie as the platform issues it: session half, two empty segments,
+    /// device half. The claims are read from the session half only.
+    #[test]
+    fn session_claims_reads_the_session_half_of_a_real_shaped_token() {
+        // Payload of a live session half, shortened: exp and oasis_id are the
+        // fields the CLI acts on.
+        let payload = base64url_encode(
+            br#"{"activated":true,"exp":1789914879,"mode":2,"oasis_id":378765055100170240}"#,
+        );
+        let token = format!("e30.{payload}.e30...e30.again.e30");
+
+        let claims = session_claims(&token).unwrap();
+        assert_eq!(claims.exp, Some(1789914879));
+        assert_eq!(claims.oasis_id, Some(378765055100170240));
+    }
+
+    #[test]
+    fn session_claims_rejects_anything_that_is_not_a_token() {
+        assert!(session_claims("").is_none());
+        assert!(session_claims("nodots").is_none());
+        assert!(session_claims("header.!!!not-base64!!!.sig").is_none());
+        assert!(session_claims("header.not-json.sig").is_none());
+    }
+
+    /// A payload that parses but carries neither claim leaves the caller with
+    /// nothing to act on, which every caller treats as "do not refresh".
+    #[test]
+    fn session_claims_of_an_empty_payload_carry_nothing() {
+        let claims = session_claims("e30.e30.e30").unwrap();
+        assert_eq!(claims.exp, None);
+        assert_eq!(claims.oasis_id, None);
+    }
+
+    #[test]
+    fn base64url_decode_round_trips_through_the_encoder() {
+        for raw in [
+            &b"{}"[..],
+            b"{\"exp\":1789914879}",
+            "余额".as_bytes(),
+            &[0u8, 1, 2, 253, 254, 255],
+        ] {
+            assert_eq!(
+                base64url_decode(&base64url_encode(raw)).as_deref(),
+                Some(raw)
+            );
+        }
     }
 }

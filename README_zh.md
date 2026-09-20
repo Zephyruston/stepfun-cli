@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/rust-1.85%2B-orange?logo=rust" alt="Rust 1.85+">
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT">
-  <img src="https://img.shields.io/badge/tests-29%20passing-brightgreen" alt="Tests: 29 passing">
+  <img src="https://img.shields.io/badge/tests-53%20passing-brightgreen" alt="Tests: 53 passing">
 </p>
 
 [English](README.md)
@@ -28,6 +28,7 @@
 - **详细模式** — `-v` 追加 Credit 桶、逐条用量记录，以及本项目尚未建模的响应字段
 - **单二进制** — 基于 `ureq` 的阻塞式 HTTP，无 async 运行时，零运行时依赖
 - **只存 token** — 密码绝不落盘，只保存 Oasis token 及其绑定的设备 id
+- **会话自动续期** — 30 分钟的 token 通过平台自己的接口刷新，从"每半小时登录一次"变成"大约每月一次"
 
 ## 安装
 
@@ -157,11 +158,18 @@ stepfun login
 2. `SignInByPassword` — 携带该设备的 cookie 提交账号密码，响应头 `oasis-token` 即登录 token
 3. 落盘前先用一次 `QueryAccountBalance` 验证 token 可用
 
-凭据由 [`confy`](https://docs.rs/confy) 保存在 `~/.config/stepfun-cli/credentials.toml`，Unix 下权限为 `0600`。只保存 token 和它绑定的设备 id，**不保存密码**。
+凭据由 [`confy`](https://docs.rs/confy) 保存在 `~/.config/stepfun-cli/credentials.toml`，Unix 下权限为 `0600`。只保存 token 和它绑定的设备 id；**密码永远不会落盘**。
 
-> **注意：** `SignInByPassword` 无验证码，但返回的 token**有效期只有 30 分钟**——登录后半小时起，所有命令都会报 `Session token rejected by the server`。重新 `stepfun login` 即可，没有别的问题，也不需要清理任何状态。
+> **注意：** token 确实短效，但你不需要为它操心。它由两段 JWT 拼成：一段**会话段**，签发后 **30 分钟**过期；一段**设备段**，登录后 **30 天**过期。会话段通过平台自己的 `RefreshToken` 接口从设备段续期——就是网页端调的那个——**不需要密码**，也不需要重新输入任何东西。
 >
-> 这是用真实会话实测出来的（19:23 登录，19:53 首次被拒），与常见的「设备那半段能撑 300 天、查询不受影响」说法**不一致**。交互使用时，请按每半小时重新登录一次来预期。
+> 续期只发生在两个时刻，都在普通一次命令执行的过程中：
+>
+> - **发请求之前** —— 当存储的会话段剩余寿命 **≤ 5 分钟**（即 token 已满 25 分钟龄）时，先续期再发请求，这样命令不会付出一次失败请求的代价。
+> - **拿到 401 之后** —— 如果调用仍返回 `token is expired`，就续期一次并把命令重试一次。这一条负责兜住两次运行之间的长间隔：几小时前就过期的会话段，会在你下一次运行命令时被续上，只要设备段还活着。
+>
+> **没有后台进程**——不运行命令就什么都不会刷新；会话段剩余寿命还超过 5 分钟时也什么都不会刷新。（平台另外还会在会话段生命的前约 15 分钟内忽略续期请求、原样返回旧 token，所以刚登录完就刷新是空操作。）
+>
+> 唯一最终会用到密码的是设备段：登录满 30 天后它失效，服务端不再续期，此时才需要重新 `stepfun login`。续期失败时会明确报出来，而不是悄悄退化。
 
 ### 退出登录
 

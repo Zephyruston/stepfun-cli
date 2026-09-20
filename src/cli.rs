@@ -14,7 +14,7 @@ pub struct Cli {
     pub command: Commands,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 pub enum Commands {
     /// Show everything: balance, subscription, credit, and recent usage
     Status {

@@ -22,6 +22,7 @@ pub const M_QUERY_STEP_PLAN_USAGES: &str = "QueryStepPlanUsages";
 
 pub const M_REGISTER_DEVICE: &str = "RegisterDevice";
 pub const M_SIGN_IN_BY_PASSWORD: &str = "SignInByPassword";
+pub const M_REFRESH_TOKEN: &str = "RefreshToken";
 
 // ── Headers ──────────────────────────────────────────────────────────────
 
@@ -36,6 +37,9 @@ pub const CONNECT_PROTOCOL_VERSION: &str = "1";
 pub const OASIS_TOKEN_COOKIE: &str = "Oasis-Token";
 /// Response header carrying the login token on `SignInByPassword`.
 pub const OASIS_TOKEN_HEADER: &str = "oasis-token";
+/// Joins the two JWT halves inside the `Oasis-Token` cookie: the session half,
+/// two empty segments, then the device half.
+pub const TOKEN_HALF_SEPARATOR: &str = "...";
 
 // ── Tunables ─────────────────────────────────────────────────────────────
 
@@ -50,6 +54,9 @@ pub const USAGE_GRANULAR_HOUR: u32 = 1;
 pub const DEFAULT_USAGE_DAYS: i64 = 7;
 /// Window of the usage summary shown by `stepfun status`.
 pub const STATUS_USAGE_DAYS: i64 = 7;
+/// Renew the session once it is within this many seconds of expiring, so a
+/// command that runs after a long idle period costs no failed request.
+pub const REFRESH_MARGIN_SECS: i64 = 300;
 
 /// Number of digits kept in the masked username.
 pub const USERNAME_KEEP_HEAD: usize = 3;

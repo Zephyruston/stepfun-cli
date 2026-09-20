@@ -148,3 +148,30 @@ pub fn login_responses(token: &str, device_id: &str) -> Vec<Response> {
 pub fn balance_response(balance: &str) -> Response {
     Response::ok(&format!(r#"{{"balance":"{balance}","cost_total":"12.5"}}"#))
 }
+
+/// Encode to unpadded base64url, so JWT-shaped fixtures stay readable.
+pub fn base64url(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let mut buffer = 0u32;
+        for (i, byte) in chunk.iter().enumerate() {
+            buffer |= u32::from(*byte) << (16 - 8 * i);
+        }
+        for i in 0..chunk.len() + 1 {
+            out.push(ALPHABET[(buffer >> (18 - 6 * i)) as usize & 63] as char);
+        }
+    }
+    out
+}
+
+/// A single JWT carrying `payload`, as `access_token` and `refresh_token` do.
+pub fn jwt(payload: &str) -> String {
+    format!("e30.{}.e30", base64url(payload.as_bytes()))
+}
+
+/// A token in the platform's cookie shape: the session half whose payload is
+/// `session_claims`, two empty segments, then the device half.
+pub fn oasis_token(session_claims: &str) -> String {
+    format!("{}...device.jwt", jwt(session_claims))
+}

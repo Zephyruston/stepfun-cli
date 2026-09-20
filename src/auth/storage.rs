@@ -75,3 +75,27 @@ pub fn path() -> Option<String> {
         .ok()
         .map(|p| p.display().to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn credentials_round_trip_without_losing_the_token() {
+        let stored = Credentials {
+            username: "13812348888".into(),
+            token: " a.b...c.d ".into(),
+            webid: " device-1 ".into(),
+        };
+        let file: CredentialsFile = (&stored).into();
+        // The token halves and the device id are trimmed; the username is kept
+        // as it was typed.
+        assert_eq!(file.token, "a.b...c.d");
+        assert_eq!(file.webid, "device-1");
+
+        let back: Credentials = (&file).into();
+        assert_eq!(back.username, "13812348888");
+        assert_eq!(back.token, "a.b...c.d");
+        assert_eq!(back.webid, "device-1");
+    }
+}

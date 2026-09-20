@@ -5,7 +5,7 @@ Monitor your [StepFun (阶跃星辰)](https://platform.stepfun.com) open-platfor
 <p align="center">
   <img src="https://img.shields.io/badge/rust-1.85%2B-orange?logo=rust" alt="Rust 1.85+">
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT">
-  <img src="https://img.shields.io/badge/tests-29%20passing-brightgreen" alt="Tests: 29 passing">
+  <img src="https://img.shields.io/badge/tests-53%20passing-brightgreen" alt="Tests: 53 passing">
 </p>
 
 [中文文档](README_zh.md)
@@ -27,6 +27,7 @@ The interface is not publicly documented, so it was reverse-engineered from the 
 - **Verbose mode** — `-v` adds credit buckets, per-record usage rows, and any response fields this CLI does not model yet
 - **Single binary** — blocking HTTP via `ureq`, no async runtime, zero runtime dependencies
 - **Token only** — your password is never written to disk; only the Oasis token and the device id it is bound to
+- **Self-renewing session** — the 30-minute token is refreshed through the platform's own endpoint, so you log in about once a month rather than every half hour
 
 ## Install
 
@@ -156,11 +157,18 @@ The flow mirrors the web app:
 2. `SignInByPassword` — the account password is posted carrying that device's cookie; the response header `oasis-token` holds the login token
 3. The token is verified with one `QueryAccountBalance` call before anything is written to disk
 
-Credentials are stored by [`confy`](https://docs.rs/confy) at `~/.config/stepfun-cli/credentials.toml`, restricted to `0600` on Unix. Only the token and the device id it is bound to are saved — never the password.
+Credentials are stored by [`confy`](https://docs.rs/confy) at `~/.config/stepfun-cli/credentials.toml`, restricted to `0600` on Unix. Only the token and the device id it is bound to are saved. **Your password is never written to disk.**
 
-> **Note:** `SignInByPassword` has no captcha, but the token it returns is short-lived: the session half expires **30 minutes** after login, after which every command reports `Session token rejected by the server`. Just run `stepfun login` again — there is nothing to fix and no state to clear.
+> **Note:** the token is short-lived, but you never have to think about it. It is two JWTs joined together: a _session_ half that expires **30 minutes** after it is issued, and a _device_ half that expires **30 days** after login. The session half is renewed from the device half through the platform's own `RefreshToken` endpoint — the same call the web app makes — so no password is involved and nothing needs re-entering.
 >
-> This was measured on a live session (login at 19:23, first rejection at 19:53), and it contradicts the common claim that the device half of the token lasts ~300 days. Budget a re-login roughly every half hour when using the CLI interactively.
+> Renewal happens at one of two moments, both inside an ordinary command run:
+>
+> - **Before the call** — once the stored session has **5 minutes or less** to live (the token is at least 25 minutes old), it is renewed first, so the command costs no failed request.
+> - **After a 401** — if a call still comes back `token is expired`, the session is renewed once and the command retried once. This is what covers a long gap between runs: a session that expired hours ago is renewed by the next command you run, as long as the device half is still alive.
+>
+> There is no background process — nothing is refreshed unless you run a command, and nothing is refreshed while the session still has more than 5 minutes to live. (The platform also ignores a renewal during roughly the first 15 minutes of a session's life and hands back the same token, so refreshing right after login is a no-op.)
+>
+> The only thing that eventually needs your password is the device half: 30 days after login it lapses, the server stops renewing, and `stepfun login` is needed again. A failed renewal reports that plainly rather than silently degrading.
 
 ### Logout
 
