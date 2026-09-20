@@ -544,7 +544,16 @@ mod tests {
         assert_eq!(format_rate(None), "-");
         assert_eq!(format_count(Some(1000)), "1,000");
         assert_eq!(format_ts(None), "-");
-        assert_eq!(format_ts(Some(0)), "1970-01-01 08:00:00");
+        // Rendered in the machine's local timezone, so the expectation is
+        // built the same way instead of hardcoding UTC+8 — CI runs in UTC.
+        assert_eq!(
+            format_ts(Some(0)),
+            DateTime::from_timestamp(0, 0)
+                .unwrap()
+                .with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        );
     }
 
     #[test]
