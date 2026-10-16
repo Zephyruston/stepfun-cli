@@ -108,6 +108,8 @@ pub struct AccountBalance {
     pub voucher: Option<Str>,
     /// Part of the voucher usable for API calls.
     pub voucher_api: Option<Str>,
+    /// Voucher granted by the subscription plan. Same 分 unit as `voucher`.
+    pub voucher_plan: Option<Str>,
     pub credit: Option<Str>,
     pub cost_yesterday: Option<Str>,
     pub cost_month: Option<Str>,
@@ -133,6 +135,8 @@ pub struct PlanDefinition {
     pub price: Option<Str>,
     pub original_price: Option<Str>,
     pub duration_days: Option<u32>,
+    /// Models the plan may call, as the platform spells them.
+    pub support_models: Option<Vec<String>>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -141,6 +145,8 @@ pub struct PlanDefinition {
 pub struct Subscription {
     pub plan_type: Option<Str>,
     pub name: Option<Str>,
+    /// Unix seconds at which the current period started.
+    pub activated_at: Option<Str>,
     /// Unix seconds.
     pub expired_at: Option<Str>,
     pub auto_renew: Option<bool>,
@@ -180,6 +186,9 @@ pub struct PlanCreditRateLimit {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct CreditBucket {
+    /// Which kind of credit the bucket holds: `1` subscription, `2` topped-up.
+    #[serde(rename = "type")]
+    pub kind: Option<Str>,
     pub credit_total: Option<Str>,
     pub credit_residual: Option<Str>,
     /// Unix seconds.
@@ -213,11 +222,24 @@ pub struct StepPlanUsages {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct UsageRecord {
-    /// Unix seconds.
+    /// Unix milliseconds — the start of the hour the record covers.
     pub from_time: Option<Str>,
+    /// Unix milliseconds, one hour after `from_time`.
     pub to_time: Option<Str>,
     pub model_id: Option<Str>,
+    /// Model category: `1` text model, `11` deep search, and so on. Deep-search
+    /// records report no token counts at all.
+    pub model_type: Option<Str>,
     pub calls: Option<Str>,
+    /// Prompt tokens. Whether the cached ones are counted inside this figure is
+    /// not documented — see docs/protocol.md.
+    pub in_amount: Option<Str>,
+    /// Completion tokens.
+    pub out_amount: Option<Str>,
+    /// Tokens served from cache, billed at a reduced rate.
+    pub cache_amount: Option<Str>,
+    /// Images generated; `0` for every text model.
+    pub image_count: Option<Str>,
     pub credit_consumed: Option<Str>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -342,6 +364,7 @@ mod tests {
     fn balance_accepts_string_and_number_fields() {
         let body = json(
             r#"{"balance":"123.45","payment":100,"voucher":"23.45","credit":0,
+                "voucher_api":"23.45","voucher_plan":"5",
                 "cost_yesterday":"1.2","cost_month":"45.6","cost_total":678.9,
                 "notify_threshold":"10"}"#,
         );
@@ -349,6 +372,10 @@ mod tests {
         assert_eq!(parsed.balance.as_ref().and_then(Str::as_f64), Some(123.45));
         assert_eq!(parsed.payment.as_ref().and_then(Str::as_f64), Some(100.0));
         assert_eq!(parsed.credit.as_ref().and_then(Str::as_f64), Some(0.0));
+        assert_eq!(
+            parsed.voucher_plan.as_ref().and_then(Str::as_f64),
+            Some(5.0)
+        );
         assert_eq!(
             parsed.cost_total.as_ref().and_then(Str::as_f64),
             Some(678.9)
@@ -375,7 +402,7 @@ mod tests {
                  "topup_credit_left_rate":1,
                  "subscription_credit_reset_time":"1790160000",
                  "credit_buckets":[
-                   {"credit_total":"1000","credit_residual":"425","next_reset_at":"1790160000","expire_at":"1800000000"}
+                   {"type":1,"credit_total":"1000","credit_residual":"425","next_reset_at":"1790160000","expire_at":"1800000000"}
                  ]},
                "five_hour_usage":"whatever"}"#,
         );
@@ -399,6 +426,7 @@ mod tests {
         );
         let buckets = rl.credit_buckets.unwrap();
         assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].kind.as_ref().map(Str::as_str), Some("1"));
         assert_eq!(
             buckets[0].credit_residual.as_ref().and_then(Str::as_f64),
             Some(425.0)
@@ -410,25 +438,34 @@ mod tests {
     #[test]
     fn subscription_parses_plan_and_expiry() {
         let parsed: StepPlanStatus = serde_json::from_value(json(
-            r#"{"subscription":{"plan_type":2,"name":"Step Plan","expired_at":"1790160000","auto_renew":true}}"#,
+            r#"{"subscription":{"plan_type":2,"name":"Step Plan","activated_at":"1760000000","expired_at":"1790160000","auto_renew":true},
+                "plan_definition":{"price":"9900","support_models":["step-5-preview","step-3.7-flash"]}}"#,
         ))
         .unwrap();
         let sub = parsed.subscription.unwrap();
         assert_eq!(sub.name.as_ref().map(Str::as_str), Some("Step Plan"));
         assert_eq!(sub.plan_type.as_ref().map(Str::as_str), Some("2"));
         assert_eq!(
+            sub.activated_at.as_ref().and_then(to_epoch_secs),
+            Some(1760000000)
+        );
+        assert_eq!(
             sub.expired_at.as_ref().and_then(to_epoch_secs),
             Some(1790160000)
         );
         assert_eq!(sub.auto_renew, Some(true));
+        let models = parsed.plan_definition.unwrap().support_models.unwrap();
+        assert_eq!(models, ["step-5-preview", "step-3.7-flash"]);
     }
 
     #[test]
     fn usages_parse_records_with_mixed_types() {
         let parsed: StepPlanUsages = serde_json::from_value(json(
             r#"{"total":"128","records":[
-                 {"from_time":"1758000000","to_time":"1758003600","model_id":"step-3","calls":"12","credit_consumed":0.5},
-                 {"from_time":"1758003600","to_time":"1758007200","model_id":"step-3","calls":3,"credit_consumed":"1.25"}
+                 {"from_time":"1760000000000","to_time":"1760003600000","model_id":"step-3","model_type":1,
+                  "calls":"12","in_amount":"12345678","out_amount":24680,"cache_amount":"11223344",
+                  "image_count":"0","credit_consumed":0.5},
+                 {"from_time":"1760007200000","to_time":"1760010800000","model_id":"dr-search-api","model_type":11,"calls":3,"credit_consumed":"1.25"}
                ]}"#,
         ))
         .unwrap();
@@ -444,6 +481,23 @@ mod tests {
             records[0].model_id.as_ref().map(Str::as_str),
             Some("step-3")
         );
+        // Token counts arrive as strings or numbers, like every other field.
+        assert_eq!(
+            records[0].in_amount.as_ref().and_then(Str::as_u64),
+            Some(12345678)
+        );
+        assert_eq!(
+            records[0].out_amount.as_ref().and_then(Str::as_u64),
+            Some(24680)
+        );
+        assert_eq!(
+            records[0].cache_amount.as_ref().and_then(Str::as_u64),
+            Some(11223344)
+        );
+        assert_eq!(records[0].model_type.as_ref().map(Str::as_str), Some("1"));
+        // Deep-search records carry no token counts at all.
+        assert!(records[1].in_amount.is_none());
+        assert!(records[1].cache_amount.is_none());
     }
 
     #[test]
@@ -500,16 +554,16 @@ mod tests {
     /// device half. The claims are read from the session half only.
     #[test]
     fn session_claims_reads_the_session_half_of_a_real_shaped_token() {
-        // Payload of a live session half, shortened: exp and oasis_id are the
-        // fields the CLI acts on.
+        // A session payload in the shape the platform issues; exp and oasis_id
+        // are the fields the CLI acts on. Values are fabricated.
         let payload = base64url_encode(
-            br#"{"activated":true,"exp":1789914879,"mode":2,"oasis_id":378765055100170240}"#,
+            br#"{"activated":true,"exp":1790000000,"mode":2,"oasis_id":123456789012345678}"#,
         );
         let token = format!("e30.{payload}.e30...e30.again.e30");
 
         let claims = session_claims(&token).unwrap();
-        assert_eq!(claims.exp, Some(1789914879));
-        assert_eq!(claims.oasis_id, Some(378765055100170240));
+        assert_eq!(claims.exp, Some(1790000000));
+        assert_eq!(claims.oasis_id, Some(123456789012345678));
     }
 
     #[test]
@@ -533,7 +587,7 @@ mod tests {
     fn base64url_decode_round_trips_through_the_encoder() {
         for raw in [
             &b"{}"[..],
-            b"{\"exp\":1789914879}",
+            b"{\"exp\":1790000000}",
             "余额".as_bytes(),
             &[0u8, 1, 2, 253, 254, 255],
         ] {

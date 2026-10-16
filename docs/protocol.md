@@ -6,6 +6,9 @@
 由于这些接口没有公开文档，本文档是维护本项目的依据——服务端一旦变更字段，
 请以这里的记录为基准对照排查。
 
+2026-10-16 对照线上响应复查过一次：用量记录新增 token 数字段、套餐与余额接口
+新增若干字段，均已更新到下表，细节见「用量记录的 token 数」一节。
+
 ## 域名
 
 | 域名                   | 用途                                                                   |
@@ -127,16 +130,51 @@ cookie 的拼法见上文「token 的两段与寿命」。
 
 | 方法                     | body                                                        | 响应字段                                                                                                                                                                                                                                                                                         |
 | ------------------------ | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `QueryAccountBalance`    | `{}`                                                        | `balance`、`payment`、`voucher`、`voucher_api`、`credit`、`cost_yesterday`、`cost_month`、`cost_total`、`notify_threshold`（金额为分，阈值为例外）；另有 `voucher_expire_time`（**秒为单位的时长**，不是时间戳）                                                                                 |
-| `GetStepPlanStatus`      | `{}`                                                        | `subscription{plan_type, name, expired_at, auto_renew}`、`plan_definition`                                                                                                                                                                                                                       |
+| `QueryAccountBalance`    | `{}`                                                        | `balance`、`payment`、`voucher`、`voucher_api`、`voucher_plan`、`credit`、`cost_yesterday`、`cost_month`、`cost_total`、`notify_threshold`（金额为分，阈值为例外）；另有 `voucher_expire_time`（**秒为单位的时长**，不是时间戳）                                                                                 |
+| `GetStepPlanStatus`      | `{}`                                                        | `subscription{plan_type, name, activated_at, expired_at, auto_renew}`（另有 `status`、`pay_channel`、`plan_id`、`plan_family`、`source_channel_code`）、`plan_definition`（另有 `support_models`、`available`、`billing_cycle`、`upgrade_info`、`zh_display`/`en_display`）                                    |
 | `QueryStepPlanRateLimit` | `{}`                                                        | `plan_credit_rate_limit{subscription_credit_left_rate, subscription_credit_reset_time, topup_credit_left_rate, credit_buckets[...]}`，以及顶层的 `five_hour_usage_left_rate`、`five_hour_usage_reset_time`、`weekly_usage_left_rate`、`weekly_usage_reset_time`、`plan_family`、`status`、`desc` |
-| `QueryStepPlanUsages`    | `{startTime, toTime, page, pageSize, granularHour}`（毫秒） | `records[{from_time, to_time, model_id, calls, credit_consumed}]`、`total`                                                                                                                                                                                                                       |
+| `QueryStepPlanUsages`    | `{startTime, toTime, page, pageSize, granularHour}`（毫秒） | `records[{from_time, to_time, model_id, model_type, calls, credit_consumed, in_amount, out_amount, cache_amount, image_count}]`、`total`                                                                                                                                                         |
 | `ListAccessKeys`         | `{}`                                                        | API keys（尚未实现）                                                                                                                                                                                                                                                                             |
 | `UserInfo`               | `{}`                                                        | 用户信息（尚未实现）                                                                                                                                                                                                                                                                             |
 | `ListOrganizations`      | `{}`                                                        | 组织列表（尚未实现）                                                                                                                                                                                                                                                                             |
 
 account-overview 页面的「Credit 账户」卡片，取的是 `QueryStepPlanRateLimit` 的
 `subscription_credit_left_rate`（剩余百分比）加 `subscription_credit_reset_time`。
+
+## 用量记录的 token 数
+
+2026-10-16 起，`QueryStepPlanUsages` 的每条 record 在原有字段之外多了五项
+（数值照旧是字符串/数字混用，都走 `types::Str`）：
+
+| 字段           | 含义                              | 取值示例（脱敏） |
+| -------------- | --------------------------------- | ---------------- |
+| `in_amount`    | 输入 Token 数                     | `"12345678"`     |
+| `out_amount`   | 输出 Token 数                     | `"98765"`        |
+| `cache_amount` | 缓存 Token 数                     | `"11223344"`     |
+| `image_count`  | 生成图片数，文本模型恒为 `"0"`    | `"0"`            |
+| `model_type`   | 模型分类：`1` 文本、`11` 深度搜索 | `1` / `11`       |
+
+网页端用量表的「输入/输出/缓存 Token数」三列就取前三项；CLI 的 `usage` 汇总表和
+`-v` 记录表按模型分组求和后展示同样的三列，`--json` 里另外带上 `model_type` 和
+`image_count`。
+
+**`in_amount` 是否包含 `cache_amount` 未经确认。** 实测多条记录的这两个数字量级相近
+（缓存往往占输入的九成上下），但响应本身无法说明缓存 token 有没有被算进输入 token
+（计费很可能只按非缓存部分算）。CLI 因此把三列原样并列，不做「输入 = 新增 + 缓存」
+这类推导。
+
+**深度搜索记录没有 token 数。** `model_id` 为 `dr-search-api` 时 `model_type` 为
+`11`，三个 token 字段直接缺失（不是 `"0"`）。CLI 按 0 计入汇总，不报错。
+
+**记录时间是毫秒，且网页端按结束时刻归档。** `from_time`/`to_time` 是毫秒时间戳，
+相差 3600 秒（`granularHour: 1`）。实测同一小时内、`to_time` 比 `from_time` 晚 1 秒
+不到的记录（形如 `22:11:39` → `23:11:39`），网页端显示为「23:00 ~ 00:00」——取的是
+`to_time` 所在的小时段，不是 `from_time` 的。CLI 两个时间都原样打印，不套用这个取整。
+
+**没有模型列表接口。** 试过 `Dashboard` 前缀下的 `ListModels`/`QueryModels`/
+`GetModelList` 等，以及 `Model`/`ModelService`/`Models`/`Openapi`/`Public` 等其它
+service 前缀，全部 404。`dr-search-api` → 「深度搜索」这类映射只存在于前端 bundle，
+CLI 因此继续显示原始 `model_id`。
 
 ## 滚动配额：`0` 表示「没有配额」，不是「已用完」
 
@@ -175,6 +213,10 @@ desc                                               = ""
 
 CLI 里由 `data::fen_to_yuan` 处理分→元，`data::yuan` 处理阈值这个例外。
 
+**`voucher_plan` 的单位是推断的。** 2026-10-16 新增的这个字段（套餐赠送代金券）
+按相邻 `voucher`/`voucher_api` 的惯例推断为**分**，但实测值只有 `"0"`，无从验证。
+CLI 把它和另外两个 voucher 字段一样除以 100。
+
 ## credit 是整数计数，不是金额
 
 `credit_consumed`、`credit_total`、`credit_residual` 都是整数计数，没有小数点：
@@ -186,6 +228,17 @@ credit_total    = "2000000000" → 2,000,000,000
 
 所以它们用 `data::format_credits` 格式化成整数（千分位、不带 `.00`），
 而不是当成金额保留两位小数。
+
+## credit bucket 的 `type`
+
+`plan_credit_rate_limit.credit_buckets[]` 2026-10-16 起多一个 `type` 字段，标识桶
+是哪一种 credit。实测账号只有一个桶、`type` 为 `1`，其
+`credit_residual/credit_total` 与同一响应里的 `subscription_credit_left_rate` 完全相等
+（具体数值已脱敏）——所以 **`1` = 订阅 credit 是已验证的**；`2` = 充值 credit 只是按
+`topup_credit_left_rate` 的对应关系**推断**，未验证。
+
+CLI 只把这两个码翻成 `Subscription`/`Top-up`，遇到其它码原样显示数字
+（`data::format_bucket_kind`）。
 
 ## 字段编码
 

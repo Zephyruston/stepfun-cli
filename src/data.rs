@@ -131,6 +131,19 @@ pub fn format_credits(value: f64) -> String {
     }
 }
 
+/// `credit_buckets[].type` as a label. `1` is verified against the live API —
+/// the single bucket's residual/total ratio equals `subscription_credit_left_rate`
+/// to the digit — while `2` is inferred from the matching `topup_credit_left_rate`
+/// field. An unrecognised code is shown as itself rather than guessed at.
+pub fn format_bucket_kind(kind: Option<&str>) -> String {
+    match kind {
+        Some("1") => "Subscription".to_string(),
+        Some("2") => "Top-up".to_string(),
+        Some(other) => other.to_string(),
+        None => "-".to_string(),
+    }
+}
+
 pub fn format_ts(secs: Option<i64>) -> String {
     match secs.and_then(|s| DateTime::from_timestamp(s, 0)) {
         Some(dt) => dt
@@ -247,6 +260,8 @@ pub struct BalanceView {
     pub voucher: f64,
     /// Part of the voucher usable for API calls, in 元.
     pub voucher_api: f64,
+    /// Voucher granted by the subscription plan, in 元.
+    pub voucher_plan: f64,
     pub credit: f64,
     pub yesterday: f64,
     pub month: f64,
@@ -261,12 +276,18 @@ pub struct PlanView {
     /// Monthly fee in 元.
     pub price: Option<f64>,
     pub duration_days: Option<u32>,
+    /// Unix seconds at which the current period started.
+    pub since: Option<i64>,
     pub expired_at: Option<i64>,
     pub auto_renew: Option<bool>,
+    /// Models the plan may call; empty when the platform does not list them.
+    pub support_models: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CreditBucketView {
+    /// `"1"` subscription credit, `"2"` topped-up credit.
+    pub kind: Option<String>,
     pub left: f64,
     pub total: f64,
     pub next_reset_at: Option<i64>,
@@ -293,6 +314,9 @@ pub struct CreditView {
 pub struct UsageRow {
     pub model: String,
     pub calls: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_tokens: u64,
     pub credit: f64,
 }
 
@@ -302,6 +326,13 @@ pub struct UsageRecordView {
     pub to: Option<i64>,
     pub model: String,
     pub calls: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_tokens: u64,
+    /// Model category code, absent when the platform does not report one.
+    pub model_type: Option<u64>,
+    /// Images generated, absent when the platform does not report a count.
+    pub image_count: Option<u64>,
     pub credit: f64,
 }
 
@@ -332,6 +363,7 @@ pub fn balance_view(balance: &AccountBalance) -> BalanceView {
         cash: fen_to_yuan(balance.payment.as_ref()),
         voucher: fen_to_yuan(balance.voucher.as_ref()),
         voucher_api: fen_to_yuan(balance.voucher_api.as_ref()),
+        voucher_plan: fen_to_yuan(balance.voucher_plan.as_ref()),
         credit: fen_to_yuan(balance.credit.as_ref()),
         yesterday: fen_to_yuan(balance.cost_yesterday.as_ref()),
         month: fen_to_yuan(balance.cost_month.as_ref()),
@@ -358,8 +390,19 @@ pub fn plan_view(status: &StepPlanStatus) -> Option<PlanView> {
             .filter(|s| !s.is_empty()),
         price: definition.and_then(|d| opt_fen_to_yuan(d.price.as_ref())),
         duration_days: definition.and_then(|d| d.duration_days),
+        since: opt_ts(subscription.activated_at.as_ref()),
         expired_at: opt_ts(subscription.expired_at.as_ref()),
         auto_renew: subscription.auto_renew,
+        support_models: definition
+            .and_then(|d| d.support_models.as_ref())
+            .map(|models| {
+                models
+                    .iter()
+                    .filter(|m| !m.trim().is_empty())
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 
@@ -409,6 +452,12 @@ fn quota_rate(value: Option<&Str>) -> Option<f64> {
 fn bucket_view(bucket: &CreditBucket) -> CreditBucketView {
     let total = opt_f64(bucket.credit_total.as_ref()).unwrap_or(0.0);
     CreditBucketView {
+        kind: bucket
+            .kind
+            .as_ref()
+            .map(Str::as_str)
+            .map(str::to_string)
+            .filter(|s| !s.is_empty()),
         left: opt_f64(bucket.credit_residual.as_ref()).unwrap_or(0.0),
         total,
         next_reset_at: opt_ts(bucket.next_reset_at.as_ref()),
@@ -425,18 +474,24 @@ pub fn usage_view(usages: &StepPlanUsages, window: &UsageWindow) -> UsageView {
         .map(record_view)
         .collect();
 
-    let mut totals: BTreeMap<String, (u64, f64)> = BTreeMap::new();
+    let mut totals: BTreeMap<String, ModelTotals> = BTreeMap::new();
     for record in &records {
-        let entry = totals.entry(record.model.clone()).or_insert((0, 0.0));
-        entry.0 += record.calls;
-        entry.1 += record.credit;
+        let entry = totals.entry(record.model.clone()).or_default();
+        entry.calls += record.calls;
+        entry.input_tokens += record.input_tokens;
+        entry.output_tokens += record.output_tokens;
+        entry.cached_tokens += record.cached_tokens;
+        entry.credit += record.credit;
     }
     let mut rows: Vec<UsageRow> = totals
         .into_iter()
-        .map(|(model, (calls, credit))| UsageRow {
+        .map(|(model, t)| UsageRow {
             model,
-            calls,
-            credit,
+            calls: t.calls,
+            input_tokens: t.input_tokens,
+            output_tokens: t.output_tokens,
+            cached_tokens: t.cached_tokens,
+            credit: t.credit,
         })
         .collect();
     rows.sort_by(|a, b| {
@@ -456,6 +511,17 @@ pub fn usage_view(usages: &StepPlanUsages, window: &UsageWindow) -> UsageView {
     }
 }
 
+/// Per-model totals of one usage window. Token counts are summed separately
+/// because a model's prompt and completion volumes diverge widely.
+#[derive(Debug, Default)]
+struct ModelTotals {
+    calls: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    cached_tokens: u64,
+    credit: f64,
+}
+
 fn record_view(record: &UsageRecord) -> UsageRecordView {
     UsageRecordView {
         from: to_epoch_secs_from(record.from_time.as_ref()),
@@ -467,6 +533,11 @@ fn record_view(record: &UsageRecord) -> UsageRecordView {
             .unwrap_or("-")
             .to_string(),
         calls: opt_u64(record.calls.as_ref()).unwrap_or(0),
+        input_tokens: opt_u64(record.in_amount.as_ref()).unwrap_or(0),
+        output_tokens: opt_u64(record.out_amount.as_ref()).unwrap_or(0),
+        cached_tokens: opt_u64(record.cache_amount.as_ref()).unwrap_or(0),
+        model_type: opt_u64(record.model_type.as_ref()),
+        image_count: opt_u64(record.image_count.as_ref()),
         credit: opt_f64(record.credit_consumed.as_ref()).unwrap_or(0.0),
     }
 }
@@ -563,6 +634,7 @@ mod tests {
             balance: Some(str("1500")),
             voucher: Some(str("1500")),
             voucher_api: Some(str("1500")),
+            voucher_plan: Some(str("250")),
             cost_yesterday: Some(str("0")),
             notify_threshold: Some(str("2")),
             ..Default::default()
@@ -571,6 +643,8 @@ mod tests {
         assert_eq!(view.balance, 15.0);
         assert_eq!(view.voucher, 15.0);
         assert_eq!(view.voucher_api, 15.0);
+        // Plan-granted voucher, same 分 unit as the other voucher fields.
+        assert_eq!(view.voucher_plan, 2.5);
         assert_eq!(view.yesterday, 0.0);
         assert_eq!(view.cash, 0.0);
         assert_eq!(view.total, 0.0);
@@ -602,12 +676,21 @@ mod tests {
     }
 
     #[test]
+    fn bucket_kind_labels_the_known_codes_only() {
+        assert_eq!(format_bucket_kind(Some("1")), "Subscription");
+        assert_eq!(format_bucket_kind(Some("2")), "Top-up");
+        // A code the platform adds later is shown as itself, not guessed at.
+        assert_eq!(format_bucket_kind(Some("7")), "7");
+        assert_eq!(format_bucket_kind(None), "-");
+    }
+
+    #[test]
     fn usage_view_sums_by_model_and_sorts_by_credit() {
         let usages: StepPlanUsages = serde_json::from_str(
             r#"{"total":"3","records":[
-                 {"model_id":"step-2","calls":"5","credit_consumed":"1.5"},
-                 {"model_id":"step-3","calls":"10","credit_consumed":"0.5"},
-                 {"model_id":"step-2","calls":"2","credit_consumed":"0.25"}
+                 {"model_id":"step-2","calls":"5","credit_consumed":"1.5","in_amount":"1000","out_amount":"20","cache_amount":"800"},
+                 {"model_id":"step-3","calls":"10","credit_consumed":"0.5","in_amount":"7","out_amount":3,"cache_amount":"0"},
+                 {"model_id":"step-2","calls":"2","credit_consumed":"0.25","in_amount":"500","out_amount":"10","cache_amount":"400"}
                ]}"#,
         )
         .unwrap();
@@ -619,8 +702,36 @@ mod tests {
         assert_eq!(view.rows[0].model, "step-2");
         assert_eq!(view.rows[0].calls, 7);
         assert_eq!(view.rows[0].credit, 1.75);
+        assert_eq!(view.rows[0].input_tokens, 1500);
+        assert_eq!(view.rows[0].output_tokens, 30);
+        assert_eq!(view.rows[0].cached_tokens, 1200);
         assert_eq!(view.rows[1].model, "step-3");
+        // A number where the other records send a string.
+        assert_eq!(view.rows[1].output_tokens, 3);
         assert_eq!(view.records[0].model, "step-2");
+        assert_eq!(view.records[0].cached_tokens, 800);
+    }
+
+    /// Deep-search records report no token counts at all, so they add nothing
+    /// to the token columns instead of failing the whole row.
+    #[test]
+    fn usage_view_treats_missing_token_counts_as_zero() {
+        let usages: StepPlanUsages = serde_json::from_str(
+            r#"{"total":"1","records":[
+                 {"model_id":"dr-search-api","model_type":11,"calls":"5","credit_consumed":"12345"}
+               ]}"#,
+        )
+        .unwrap();
+        let view = usage_view(&usages, &window_from_days(7));
+        assert_eq!(view.rows.len(), 1);
+        assert_eq!(view.rows[0].calls, 5);
+        assert_eq!(view.rows[0].input_tokens, 0);
+        assert_eq!(view.rows[0].output_tokens, 0);
+        assert_eq!(view.rows[0].cached_tokens, 0);
+        assert_eq!(view.rows[0].credit, 12345.0);
+        // The category code and image count are reported for scripting.
+        assert_eq!(view.records[0].model_type, Some(11));
+        assert_eq!(view.records[0].image_count, None);
     }
 
     #[test]
@@ -639,7 +750,7 @@ mod tests {
             r#"{"plan_credit_rate_limit":{
                  "subscription_credit_left_rate":"0.425",
                  "subscription_credit_reset_time":"1790160000",
-                 "credit_buckets":[{"credit_total":"1000","credit_residual":"425","next_reset_at":"1790160000"}],
+                 "credit_buckets":[{"type":1,"credit_total":"1000","credit_residual":"425","next_reset_at":"1790160000"}],
                  "weekly_credit_rate":"0.9"},
                "five_hour_usage_left_rate":"0.35",
                "five_hour_usage_reset_time":"1790160000",
@@ -651,6 +762,7 @@ mod tests {
         assert_eq!(view.subscription_left_rate, Some(0.425));
         assert_eq!(view.reset_at, Some(1790160000));
         assert_eq!(view.buckets.len(), 1);
+        assert_eq!(view.buckets[0].kind.as_deref(), Some("1"));
         assert_eq!(view.buckets[0].left, 425.0);
         assert_eq!(view.buckets[0].total, 1000.0);
         assert_eq!(view.five_hour_left_rate, Some(0.35));
@@ -668,14 +780,17 @@ mod tests {
     #[test]
     fn plan_view_carries_the_monthly_fee_in_yuan() {
         let plan: StepPlanStatus = serde_json::from_str(
-            r#"{"subscription":{"name":"Plus","plan_type":"1","expired_at":"1792486753","auto_renew":false},
-                "plan_definition":{"price":"9900","original_price":"12800","duration_days":30}}"#,
+            r#"{"subscription":{"name":"Plus","plan_type":"1","activated_at":"1760000000","expired_at":"1792486753","auto_renew":false},
+                "plan_definition":{"price":"9900","original_price":"12800","duration_days":30,
+                  "support_models":["step-5-preview","step-3.7-flash",""]}}"#,
         )
         .unwrap();
         let view = plan_view(&plan).unwrap();
         assert_eq!(view.name.as_deref(), Some("Plus"));
         assert_eq!(view.price, Some(99.0));
         assert_eq!(view.duration_days, Some(30));
+        assert_eq!(view.since, Some(1760000000));
+        assert_eq!(view.support_models, ["step-5-preview", "step-3.7-flash"]);
     }
 
     #[test]

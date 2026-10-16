@@ -93,8 +93,8 @@ fn login_failure_reports_server_message() {
 
 // ── RefreshToken ──────────────────────────────────────────────────────────
 
-const ACCOUNT: &str = r#"{"exp":1789914879,"oasis_id":378765055100170240}"#;
-const ANONYMOUS: &str = r#"{"exp":1789914879,"oasis_id":412970297706733568}"#;
+const ACCOUNT: &str = r#"{"exp":1790000000,"oasis_id":123456789012345678}"#;
+const ANONYMOUS: &str = r#"{"exp":1790000000,"oasis_id":876543210987654321}"#;
 
 /// Renewing a session needs no password: the stored token is exchanged for a
 /// fresh pair of halves and reassembled into the cookie shape.

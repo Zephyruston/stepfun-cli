@@ -3,8 +3,8 @@ use tabled::Table;
 use tabled::settings::Style;
 
 use crate::data::{
-    BalanceView, CreditView, PlanView, StatusView, UsageView, format_amount, format_count,
-    format_credits, format_rate, format_ts,
+    BalanceView, CreditView, PlanView, StatusView, UsageView, format_amount, format_bucket_kind,
+    format_count, format_credits, format_rate, format_ts,
 };
 
 /// Print a value as pretty JSON (for scripting / piping).
@@ -22,19 +22,7 @@ pub fn show_status(view: &StatusView, verbose: bool) {
     println!("  StepFun Account · {}", view.username);
     println!();
 
-    let rows = vec![
-        ItemRow::stat("Balance", format_amount(Some(view.balance.balance))),
-        ItemRow::stat("Cash", format_amount(Some(view.balance.cash))),
-        ItemRow::stat("Voucher", format_amount(Some(view.balance.voucher))),
-        ItemRow::stat(
-            "Voucher (API)",
-            format_amount(Some(view.balance.voucher_api)),
-        ),
-        ItemRow::stat("Credit", format_amount(Some(view.balance.credit))),
-        ItemRow::stat("Yesterday", format_amount(Some(view.balance.yesterday))),
-        ItemRow::stat("This month", format_amount(Some(view.balance.month))),
-        ItemRow::stat("Total spend", format_amount(Some(view.balance.total))),
-    ];
+    let rows = balance_rows(&view.balance, "Balance");
     println!("{}", Table::new(rows).with(Style::rounded()));
 
     if let Some(threshold) = view.balance.threshold
@@ -57,6 +45,9 @@ fn show_plan(plan: &PlanView) {
     let mut rows = vec![ItemRow::new("Plan", plan_label(plan))];
     if let Some(plan_type) = &plan.plan_type {
         rows.push(ItemRow::stat("Plan type", plan_type.clone()));
+    }
+    if let Some(since) = plan.since {
+        rows.push(ItemRow::stat("Since", format_ts(Some(since))));
     }
     if let Some(expired_at) = plan.expired_at {
         rows.push(ItemRow::stat("Expires", format_ts(Some(expired_at))));
@@ -90,22 +81,43 @@ fn show_plan_opt(plan: &Option<PlanView>) {
     show_plan(plan);
 }
 
+/// The models a plan may call, listed one per line: a table would either wrap
+/// them into an unreadable cell or waste a column on a single value.
+fn show_support_models(models: &[String]) {
+    if models.is_empty() {
+        return;
+    }
+    println!();
+    println!("  Supported models");
+    println!();
+    for model in models {
+        println!("    {}", model);
+    }
+}
+
 // ── balance ──────────────────────────────────────────────────────────────
+
+/// The money rows shared by `status` and `balance`; only the label of the first
+/// one differs between the two.
+fn balance_rows(view: &BalanceView, total_label: &'static str) -> Vec<ItemRow> {
+    vec![
+        ItemRow::stat(total_label, format_amount(Some(view.balance))),
+        ItemRow::stat("Cash", format_amount(Some(view.cash))),
+        ItemRow::stat("Voucher", format_amount(Some(view.voucher))),
+        ItemRow::stat("Voucher (API)", format_amount(Some(view.voucher_api))),
+        ItemRow::stat("Voucher (Plan)", format_amount(Some(view.voucher_plan))),
+        ItemRow::stat("Credit", format_amount(Some(view.credit))),
+        ItemRow::stat("Yesterday", format_amount(Some(view.yesterday))),
+        ItemRow::stat("This month", format_amount(Some(view.month))),
+        ItemRow::stat("Total spend", format_amount(Some(view.total))),
+    ]
+}
 
 pub fn show_balance(view: &BalanceView, username: &str) {
     println!();
     println!("  StepFun Balance · {}", username);
     println!();
-    let rows = vec![
-        ItemRow::stat("Total", format_amount(Some(view.balance))),
-        ItemRow::stat("Cash", format_amount(Some(view.cash))),
-        ItemRow::stat("Voucher", format_amount(Some(view.voucher))),
-        ItemRow::stat("Voucher (API)", format_amount(Some(view.voucher_api))),
-        ItemRow::stat("Credit", format_amount(Some(view.credit))),
-        ItemRow::stat("Yesterday", format_amount(Some(view.yesterday))),
-        ItemRow::stat("This month", format_amount(Some(view.month))),
-        ItemRow::stat("Total spend", format_amount(Some(view.total))),
-    ];
+    let rows = balance_rows(view, "Total");
     println!("{}", Table::new(rows).with(Style::rounded()));
     if let Some(threshold) = view.threshold
         && threshold > 0.0
@@ -127,6 +139,9 @@ pub fn show_credit(view: &CreditView, verbose: bool) {
     }
 
     show_plan_opt(&view.plan);
+    if verbose && let Some(plan) = &view.plan {
+        show_support_models(&plan.support_models);
+    }
 
     println!();
     println!("  Credit");
@@ -151,6 +166,7 @@ pub fn show_credit(view: &CreditView, verbose: bool) {
             .buckets
             .iter()
             .map(|b| BucketRow {
+                kind: format_bucket_kind(b.kind.as_deref()),
                 left: format_credits(b.left),
                 total: format_credits(b.total),
                 used: if b.total > 0.0 {
@@ -196,17 +212,26 @@ pub fn show_usage(view: &UsageView, verbose: bool) {
         .map(|r| UsageRow {
             model: r.model.clone(),
             calls: format_count(Some(r.calls)),
+            input: format_count(Some(r.input_tokens)),
+            output: format_count(Some(r.output_tokens)),
+            cached: format_count(Some(r.cached_tokens)),
             credit: format_credits(r.credit),
         })
         .collect();
     println!("{}", Table::new(rows).with(Style::rounded()));
 
     let total_calls: u64 = view.rows.iter().map(|r| r.calls).sum();
+    let total_input: u64 = view.rows.iter().map(|r| r.input_tokens).sum();
+    let total_output: u64 = view.rows.iter().map(|r| r.output_tokens).sum();
+    let total_cached: u64 = view.rows.iter().map(|r| r.cached_tokens).sum();
     let total_credit: f64 = view.rows.iter().map(|r| r.credit).sum();
     println!();
     println!(
-        "  {} calls · {} credits",
+        "  {} calls · {} in · {} out · {} cached · {} credits",
         format_count(Some(total_calls)),
+        format_count(Some(total_input)),
+        format_count(Some(total_output)),
+        format_count(Some(total_cached)),
         format_credits(total_credit)
     );
 
@@ -228,6 +253,9 @@ pub fn show_usage(view: &UsageView, verbose: bool) {
                 to: format_ts(r.to),
                 model: r.model.clone(),
                 calls: format_count(Some(r.calls)),
+                input: format_count(Some(r.input_tokens)),
+                output: format_count(Some(r.output_tokens)),
+                cached: format_count(Some(r.cached_tokens)),
                 credit: format_credits(r.credit),
             })
             .collect();
@@ -264,6 +292,7 @@ impl ItemRow {
 #[derive(tabled::Tabled)]
 #[tabled(rename_all = "PascalCase")]
 struct BucketRow {
+    kind: String,
     left: String,
     total: String,
     used: String,
@@ -276,6 +305,9 @@ struct BucketRow {
 struct UsageRow {
     model: String,
     calls: String,
+    input: String,
+    output: String,
+    cached: String,
     credit: String,
 }
 
@@ -286,5 +318,8 @@ struct RecordRow {
     to: String,
     model: String,
     calls: String,
+    input: String,
+    output: String,
+    cached: String,
     credit: String,
 }

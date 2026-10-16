@@ -6,6 +6,7 @@ use common::{MockServer, Response};
 
 use stepfun_cli::api::ApiClient;
 use stepfun_cli::error::StepFunError;
+use stepfun_cli::types::Str;
 
 #[test]
 fn business_api_sends_single_field_cookie_and_oasis_headers() {
@@ -83,6 +84,46 @@ fn usage_query_sends_a_millisecond_window() {
     assert!(request.contains(r#""toTime":"2000000""#), "{request}");
     assert!(request.contains(r#""pageSize":50"#), "{request}");
     assert!(request.contains(r#""granularHour":1"#), "{request}");
+
+    server.finish();
+}
+
+/// The shape the platform added alongside the token-count columns on the usage
+/// page: every record now carries its prompt, completion, and cached tokens.
+#[test]
+fn usage_records_carry_token_counts() {
+    let server = MockServer::start(vec![Response::ok(
+        r#"{"total":"2","records":[
+             {"from_time":"1760000000000","to_time":"1760003600000","model_id":"step-5-preview",
+              "model_type":1,"calls":12,"credit_consumed":"1234567","in_amount":"12345678",
+              "out_amount":"24680","cache_amount":"11223344","image_count":"0"},
+             {"from_time":"1760007200000","to_time":"1760010800000","model_id":"dr-search-api",
+              "model_type":11,"calls":5,"credit_consumed":"12345"}
+           ]}"#,
+    )]);
+    let api = ApiClient::with_base_url(&server.url, "user.jwt", "device-9");
+
+    let usages = api.query_step_plan_usages(1_000_000, 2_000_000).unwrap();
+
+    let records = usages.records.unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records[0].in_amount.as_ref().and_then(Str::as_u64),
+        Some(12345678)
+    );
+    assert_eq!(
+        records[0].out_amount.as_ref().and_then(Str::as_u64),
+        Some(24680)
+    );
+    assert_eq!(
+        records[0].cache_amount.as_ref().and_then(Str::as_u64),
+        Some(11223344)
+    );
+    assert_eq!(records[0].model_type.as_ref().map(Str::as_str), Some("1"));
+    // Deep-search records report no token counts at all.
+    assert!(records[1].in_amount.is_none());
+    assert!(records[1].cache_amount.is_none());
+    assert_eq!(records[1].model_type.as_ref().map(Str::as_str), Some("11"));
 
     server.finish();
 }

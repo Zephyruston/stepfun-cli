@@ -23,6 +23,7 @@ The interface is not publicly documented, so it was reverse-engineered from the 
 - **One command** — `stepfun status` shows balance, subscription, credit allowance, and the last 7 days of model usage
 - **Per-topic commands** — `stepfun balance`, `stepfun credit`, `stepfun usage`
 - **Date selection on usage only** — `stepfun usage --days 30` or `stepfun usage --start 2026-09-01 --end 2026-09-20`
+- **Token breakdown** — usage tables split input, output, and cached tokens per model, alongside call counts and credits
 - **Machine-readable** — `--json` outputs structured data for scripting / piping
 - **Verbose mode** — `-v` adds credit buckets, per-record usage rows, and any response fields this CLI does not model yet
 - **Single binary** — blocking HTTP via `ureq`, no async runtime, zero runtime dependencies
@@ -81,28 +82,31 @@ $ stepfun status
 
   StepFun Account · 138****8888
 
-╭─────────────┬────────╮
-│ Item        │ Amount │
-├─────────────┼────────┤
-│ Balance     │ 128.45 │
-│ Cash        │ 100.00 │
-│ Voucher     │ 28.45  │
-│ Credit      │ 0.00   │
-│ Yesterday   │ 1.23   │
-│ This month  │ 45.68  │
-│ Total spend │ 678.90 │
-╰─────────────┴────────╯
+╭────────────────┬────────╮
+│ Item           │ Amount │
+├────────────────┼────────┤
+│ Balance        │ 128.45 │
+│ Cash           │ 100.00 │
+│ Voucher        │ 28.45  │
+│ Voucher (API)  │ 28.45  │
+│ Voucher (Plan) │ 0.00   │
+│ Credit         │ 0.00   │
+│ Yesterday      │ 1.23   │
+│ This month     │ 45.68  │
+│ Total spend    │ 678.90 │
+╰────────────────┴────────╯
 
   Subscription
 
-╭────────────┬─────────────────────╮
-│ Item       │ Amount              │
-├────────────┼─────────────────────┤
-│ Plan       │ Plus                │
-│ Plan type  │ 1                   │
-│ Expires    │ 2027-06-15 08:00:00 │
-│ Auto renew │ off                 │
-╰────────────┴─────────────────────╯
+╭────────────┬────────────────────────╮
+│ Item       │ Amount                 │
+├────────────┼────────────────────────┤
+│ Plan       │ Plus · 99.00 / 30 days │
+│ Plan type  │ 1                      │
+│ Since      │ 2026-05-16 08:00:00    │
+│ Expires    │ 2027-06-15 08:00:00    │
+│ Auto renew │ off                    │
+╰────────────┴────────────────────────╯
 
   Credit
 
@@ -116,26 +120,26 @@ $ stepfun status
 
   Credit buckets
 
-╭──────────────┬──────────────┬───────┬─────────────────────┬─────────────────────╮
-│ Left         │ Total        │ Used  │ NextReset           │ Expires             │
-├──────────────┼──────────────┼───────┼─────────────────────┼─────────────────────┤
-│ 425.00       │ 1,000.00     │ 57.5% │ 2027-03-22 17:00:00 │ 2027-06-15 08:00:00 │
-╰──────────────┴──────────────┴───────┴─────────────────────┴─────────────────────╯
+╭──────────────┬─────────────┬───────────────┬───────┬─────────────────────┬─────────────────────╮
+│ Kind         │ Left        │ Total         │ Used  │ NextReset           │ Expires             │
+├──────────────┼─────────────┼───────────────┼───────┼─────────────────────┼─────────────────────┤
+│ Subscription │ 425,000,000 │ 1,000,000,000 │ 57.5% │ 2027-03-22 17:00:00 │ 2027-06-15 08:00:00 │
+╰──────────────┴─────────────┴───────────────┴───────┴─────────────────────┴─────────────────────╯
 
   Model usage · last 7 days
 
-╭────────────────┬───────┬──────────────╮
-│ Model          │ Calls │ Credit       │
-├────────────────┼───────┼──────────────┤
-│ step-5-preview │ 120   │ 8,640,000.00 │
-╰────────────────┴───────┴──────────────╯
+╭────────────────┬───────┬────────────┬─────────┬────────────┬───────────╮
+│ Model          │ Calls │ Input      │ Output  │ Cached     │ Credit    │
+├────────────────┼───────┼────────────┼─────────┼────────────┼───────────┤
+│ step-5-preview │ 120   │ 96,400,000 │ 842,000 │ 91,200,000 │ 8,640,000 │
+╰────────────────┴───────┴────────────┴─────────┴────────────┴───────────╯
 
-  120 calls · 8,640,000.00 credits
+  120 calls · 96,400,000 in · 842,000 out · 91,200,000 cached · 8,640,000 credits
 ```
 
 ```
 $ stepfun usage -v
-  ...adds a Records table with the time window, model, calls, and credit of each row
+  ...adds a Records table with each record's time window, model, calls, input/output/cached tokens, and credit
 
 $ stepfun status --json | jq '.credit.subscription_left_rate'
   0.425

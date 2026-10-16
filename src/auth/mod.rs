@@ -477,8 +477,8 @@ mod tests {
 
     #[test]
     fn a_refresh_that_switches_account_is_refused() {
-        let mine = token_with(Some(1789914879), Some(378765055100170240));
-        let anonymous = token_with(Some(1789914879), Some(412970297706733568));
+        let mine = token_with(Some(1790000000), Some(123456789012345678));
+        let anonymous = token_with(Some(1790000000), Some(876543210987654321));
         assert!(same_account(&mine, &mine));
         assert!(!same_account(&mine, &anonymous));
         // No claims on either side: nothing to compare, so nothing to refuse.
